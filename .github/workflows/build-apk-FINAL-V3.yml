@@ -1,0 +1,150 @@
+name: Build Ali Gorbaj-AI APK FINAL V3
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Ali_Gorbaj_AI_FINAL_API37_FIXED.zip'
+      - '.github/workflows/build-apk-FINAL-V3.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ali-gorbaj-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_VERSION: '9.4.1'
+  ANDROID_API: '37.0'
+  ANDROID_BUILD_TOOLS: '36.0.0'
+
+jobs:
+  build-apk:
+    name: Build and verify release APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4.0.4
+
+      - name: Install required Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-${ANDROID_API}" "build-tools;${ANDROID_BUILD_TOOLS}"
+
+      - name: Validate archive and extract project
+        env:
+          ARCHIVE: Ali_Gorbaj_AI_FINAL_API37_FIXED.zip
+        run: |
+          test -s "$ARCHIVE"
+
+          python - <<'PY'
+          import zipfile
+          from pathlib import PurePosixPath
+
+          archive = "Ali_Gorbaj_AI_FINAL_API37_FIXED.zip"
+
+          with zipfile.ZipFile(archive) as zf:
+              bad = zf.testzip()
+              if bad is not None:
+                  raise SystemExit(f"Corrupt ZIP member: {bad}")
+
+              for info in zf.infolist():
+                  name = info.filename.replace("\\", "/")
+                  parts = PurePosixPath(name).parts
+                  if name.startswith("/") or ".." in parts or "\x00" in name:
+                      raise SystemExit(f"Unsafe archive member: {name}")
+
+          print("Archive validation: OK")
+          PY
+
+          rm -rf Ali_Gorbaj_AI
+          mkdir -p Ali_Gorbaj_AI
+          unzip -q "$ARCHIVE" -d Ali_Gorbaj_AI
+
+          if [ -d "Ali_Gorbaj_AI/Ali_Gorbaj_AI" ]; then
+            shopt -s dotglob
+            mv Ali_Gorbaj_AI/Ali_Gorbaj_AI/* Ali_Gorbaj_AI/
+            rmdir Ali_Gorbaj_AI/Ali_Gorbaj_AI
+          fi
+
+          test -f Ali_Gorbaj_AI/app.py
+          test -f Ali_Gorbaj_AI/android/settings.gradle
+          test -f Ali_Gorbaj_AI/android/build.gradle
+          test -f Ali_Gorbaj_AI/android/app/build.gradle
+
+      - name: Validate packaged source
+        working-directory: Ali_Gorbaj_AI
+        run: |
+          python scripts/verify_android_source_integrity.py
+          python scripts/verify_release.py
+          python -m compileall -q .
+
+      - name: Install test runner
+        run: |
+          python -m pip install --disable-pip-version-check --no-cache-dir pytest
+
+      - name: Run project tests
+        working-directory: Ali_Gorbaj_AI
+        run: |
+          python -m pytest -q tests_runtime.py tests_media_quality.py
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          cache-provider: basic
+
+      - name: Confirm Android SDK installation
+        run: |
+          test -d "$ANDROID_SDK_ROOT/platforms/android-37.0"
+          test -d "$ANDROID_SDK_ROOT/build-tools/36.0.0"
+          echo "Android SDK components: OK"
+
+      - name: Build release APK
+        working-directory: Ali_Gorbaj_AI/android
+        env:
+          STREAMLIT_APP_URL: ''
+          CHAQUOPY_BUILD_PYTHON: python3.10
+        run: |
+          gradle clean :app:assembleRelease \
+            -PAPP_VERSION_CODE="${GITHUB_RUN_NUMBER}" \
+            -PAPP_VERSION_NAME="2026.10.${GITHUB_RUN_NUMBER}-standalone" \
+            --stacktrace --no-daemon
+
+      - name: Verify APK output
+        working-directory: Ali_Gorbaj_AI
+        run: |
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          unzip -t "$APK" >/dev/null
+          sha256sum "$APK" | tee apk-sha256.txt
+          ls -lh "$APK"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Ali-Gorbaj-AI-Android-Release-${{ github.run_number }}
+          path: |
+            Ali_Gorbaj_AI/android/app/build/outputs/apk/release/app-release.apk
+            Ali_Gorbaj_AI/apk-sha256.txt
+          if-no-files-found: error
+          retention-days: 30
